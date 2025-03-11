@@ -6,6 +6,10 @@ import faiss
 import numpy as np
 import base64
 import re
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+import seaborn as sns
+from matplotlib.patches import Patch
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
@@ -23,6 +27,12 @@ SIMILARITY_THRESHOLD = 0.90  # Similarity threshold for matching questions
 AUTH_USERNAME = "admin"  # Replace with your Denodo username
 AUTH_PASSWORD = "admin"  # Replace with your Denodo password
 DATA_CATALOG_VERIFY_SSL = True  # Set to False if using self-signed certificates
+VISUALIZATION_OUTPUT_DIR = "cache_analysis_visualizations"  # Directory to save visualizations
+
+
+# Create output directory for visualizations if it doesn't exist
+if not os.path.exists(VISUALIZATION_OUTPUT_DIR):
+    os.makedirs(VISUALIZATION_OUTPUT_DIR)
 
 
 class SemanticCache:
@@ -227,15 +237,14 @@ def are_questions_semantically_related(question1, question2):
     llm = ChatOpenAI(api_key=OPENAI_API_KEY, model="gpt-3.5-turbo")
     
     prompt = ChatPromptTemplate.from_template("""
-    I need to determine if two questions about a banking database are semantically related enough 
-    that the SQL query for one could be modified to answer the other. The database contains 
-    information about bank accounts, customers, loans, properties, and loan officers.
+    I need to determine if two questions about a database are semantically related enough 
+    that the SQL query for one could be modified to answer the other.
     
     Question 1: {question1}
     Question 2: {question2}
     
     First, analyze what each question is asking for:
-    - What entity/table is each question about? (customers, loans, accounts, properties, etc.)
+    - What entity/table is each question about? (e.g., customers, products, transactions, etc.)
     - What operation is being performed? (counting, summing, averaging, ranking, listing, etc.)
     - What filters, groupings, or sorting conditions are applied?
     - What are the core parameters that might change (like top N, time period, location, etc.)?
@@ -332,6 +341,597 @@ def modify_sql_query(original_query, new_question, original_question):
     return modified_query.strip()
 
 
+# Matplotlib visualization functions
+def visualize_token_usage(performance_results):
+    """Generate a bar chart for token usage comparison."""
+    # Calculate total cache tokens
+    total_cache_tokens = performance_results["token_usage"]["cache_validation_tokens"] + performance_results["token_usage"]["cache_modification_tokens"]
+    
+    # Calculate estimated token savings
+    avg_sdk_tokens = performance_results["token_usage"]["sdk_tokens"] / performance_results["sdk_calls"] if performance_results["sdk_calls"] > 0 else 0
+    tokens_saved = (avg_sdk_tokens * performance_results["cache_hits"]) - total_cache_tokens
+    
+    # Prepare data for visualization
+    categories = ['SDK Total', 'Cache Validation', 'Cache Modification', 'Total Cache Usage', 'Estimated Savings']
+    values = [
+        performance_results["token_usage"]["sdk_tokens"],
+        performance_results["token_usage"]["cache_validation_tokens"],
+        performance_results["token_usage"]["cache_modification_tokens"],
+        total_cache_tokens,
+        tokens_saved if tokens_saved > 0 else 0
+    ]
+    
+    # Set up the figure with a specific size
+    plt.figure(figsize=(12, 6))
+    
+    # Create a horizontal bar chart with a colorful palette
+    bars = plt.barh(categories, values, color=sns.color_palette("viridis", len(categories)))
+    
+    # Add value labels at the end of each bar
+    for bar in bars:
+        width = bar.get_width()
+        label_x_pos = width if width > 0 else 0
+        plt.text(label_x_pos + 100, bar.get_y() + bar.get_height()/2, f'{int(width):,}', 
+                 va='center', fontweight='bold')
+    
+    # Add labels and title with improved styling
+    plt.xlabel('Number of Tokens', fontsize=12, fontweight='bold')
+    plt.title('Token Usage Comparison', fontsize=16, fontweight='bold', pad=20)
+    
+    # Add a grid for better readability
+    plt.grid(axis='x', linestyle='--', alpha=0.7)
+    
+    # Improve the layout
+    plt.tight_layout()
+    
+    # Save the visualization
+    plt.savefig(f"{VISUALIZATION_OUTPUT_DIR}/token_usage.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    return f"{VISUALIZATION_OUTPUT_DIR}/token_usage.png"
+
+
+def visualize_response_times(performance_results):
+    """Generate a bar chart for response time comparison."""
+    # Calculate average times
+    avg_cache_time = sum(performance_results["cache_response_times"]) / len(performance_results["cache_response_times"]) if performance_results["cache_response_times"] else 0
+    avg_sdk_time = sum(performance_results["sdk_response_times"]) / len(performance_results["sdk_response_times"]) if performance_results["sdk_response_times"] else 0
+    time_saved = avg_sdk_time * performance_results["cache_hits"] - avg_cache_time * performance_results["cache_hits"]
+    
+    # Prepare data for visualization
+    categories = ['Average SDK Response', 'Average Cache Response', 'Total Time Saved']
+    values = [avg_sdk_time, avg_cache_time, time_saved if time_saved > 0 else 0]
+    
+    # Set up the figure with a specific size
+    plt.figure(figsize=(12, 5))
+    
+    # Create a horizontal bar chart with a colorful palette
+    bars = plt.barh(categories, values, color=sns.color_palette("cool", len(categories)))
+    
+    # Add value labels at the end of each bar
+    for bar in bars:
+        width = bar.get_width()
+        label_x_pos = width if width > 0 else 0
+        plt.text(label_x_pos + 0.1, bar.get_y() + bar.get_height()/2, f'{width:.2f}s', 
+                 va='center', fontweight='bold')
+    
+    # Add labels and title with improved styling
+    plt.xlabel('Time (seconds)', fontsize=12, fontweight='bold')
+    plt.title('Response Time Comparison', fontsize=16, fontweight='bold', pad=20)
+    
+    # Calculate speedup for annotation
+    speedup = avg_sdk_time/avg_cache_time if avg_cache_time > 0 else 0
+    plt.figtext(0.5, 0.01, f'Cache is {speedup:.1f}x faster than SDK calls', 
+                ha='center', fontsize=12, fontweight='bold')
+    
+    # Add a grid for better readability
+    plt.grid(axis='x', linestyle='--', alpha=0.7)
+    
+    # Improve the layout
+    plt.tight_layout()
+    
+    # Save the visualization
+    plt.savefig(f"{VISUALIZATION_OUTPUT_DIR}/response_times.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    return f"{VISUALIZATION_OUTPUT_DIR}/response_times.png"
+
+
+def visualize_question_processing_times(performance_results):
+    """Generate a bar chart for individual question processing times."""
+    # Get the data
+    question_numbers = [f"Q{i+1}" for i in range(len(performance_results["question_texts"]))]
+    times = performance_results["all_response_times"]
+    sources = performance_results["question_sources"]
+    
+    # Set up the figure with a specific size based on number of questions
+    plt.figure(figsize=(12, max(6, len(question_numbers) * 0.5)))
+    
+    # Create color mapping for sources
+    colors = {'cache': 'forestgreen', 'sdk': 'orangered'}
+    bar_colors = [colors[source] for source in sources]
+    
+    # Create horizontal bar chart
+    bars = plt.barh(question_numbers, times, color=bar_colors)
+    
+    # Add value labels and source indicators
+    for i, (bar, source) in enumerate(zip(bars, sources)):
+        width = bar.get_width()
+        source_label = "CACHE" if source == 'cache' else "SDK"
+        plt.text(width + 0.1, bar.get_y() + bar.get_height()/2, f'{width:.2f}s ({source_label})', 
+                 va='center')
+    
+    # Add labels and title
+    plt.xlabel('Processing Time (seconds)', fontsize=12, fontweight='bold')
+    plt.ylabel('Question Number', fontsize=12, fontweight='bold')
+    plt.title('Question Processing Times', fontsize=16, fontweight='bold', pad=20)
+    
+    # Create a custom legend
+    legend_elements = [
+        Patch(facecolor=colors['cache'], label='Cache'),
+        Patch(facecolor=colors['sdk'], label='SDK')
+    ]
+    plt.legend(handles=legend_elements, loc='upper right')
+    
+    # Add a grid for better readability
+    plt.grid(axis='x', linestyle='--', alpha=0.7)
+    
+    # Calculate and add average times for each source
+    cache_times = [t for i, t in enumerate(times) if sources[i] == 'cache']
+    sdk_times = [t for i, t in enumerate(times) if sources[i] == 'sdk']
+    
+    avg_cache = sum(cache_times) / len(cache_times) if cache_times else 0
+    avg_sdk = sum(sdk_times) / len(sdk_times) if sdk_times else 0
+    
+    annotation_text = (f"Average Times:\n"
+                      f"Cache: {avg_cache:.2f}s\n"
+                      f"SDK: {avg_sdk:.2f}s")
+    
+    # Position the annotation in the lower right corner
+    plt.annotate(annotation_text, xy=(0.95, 0.05), xycoords='axes fraction',
+                 bbox=dict(boxstyle="round,pad=0.5", fc="white", ec="gray", alpha=0.8),
+                 ha='right', va='bottom')
+    
+    # Improve the layout
+    plt.tight_layout()
+    
+    # Save the visualization
+    plt.savefig(f"{VISUALIZATION_OUTPUT_DIR}/question_times.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    return f"{VISUALIZATION_OUTPUT_DIR}/question_times.png"
+
+
+def visualize_cache_effectiveness(performance_results):
+    """Generate a pie chart for cache hit rate."""
+    # Calculate rates
+    cache_hit_rate = (performance_results["cache_hits"] / performance_results["questions_processed"]) * 100 if performance_results["questions_processed"] > 0 else 0
+    sdk_call_rate = 100 - cache_hit_rate
+    
+    # Data for visualization
+    labels = ['Cache Hits', 'SDK Calls']
+    sizes = [cache_hit_rate, sdk_call_rate]
+    
+    # Use a vibrant color scheme
+    colors = ['#4CAF50', '#FF5722']
+    
+    # Create a figure with a specific size
+    plt.figure(figsize=(8, 8))
+    
+    # Create a pie chart with a slight explosion for the first slice
+    explode = (0.1, 0)  # explode the 1st slice (Cache Hits)
+    
+    wedges, texts, autotexts = plt.pie(sizes, explode=explode, labels=labels, 
+                                       colors=colors, autopct='%1.1f%%',
+                                       shadow=True, startangle=90,
+                                       textprops={'fontsize': 12, 'fontweight': 'bold'})
+    
+    # Equal aspect ratio ensures that pie is drawn as a circle
+    plt.axis('equal')  
+    
+    # Customize the pie chart
+    plt.setp(autotexts, size=12, weight="bold")
+    
+    # Add a title
+    plt.title('Cache Effectiveness', fontsize=16, fontweight='bold', pad=20)
+    
+    # Add some statistics as annotations
+    stats_text = (f"Total Questions: {performance_results['questions_processed']}\n"
+                 f"Cache Hits: {performance_results['cache_hits']}\n"
+                 f"SDK Calls Required: {performance_results['sdk_calls']}\n"
+                 f"SDK Calls Avoided: {performance_results['cache_hits']}")
+    
+    plt.annotate(stats_text, xy=(-0.2, -0.15), xycoords='axes fraction',
+                 bbox=dict(boxstyle="round,pad=0.5", fc="white", ec="gray", alpha=0.8))
+    
+    # Improve the layout
+    plt.tight_layout()
+    
+    # Save the visualization
+    plt.savefig(f"{VISUALIZATION_OUTPUT_DIR}/cache_effectiveness.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    return f"{VISUALIZATION_OUTPUT_DIR}/cache_effectiveness.png"
+
+
+def visualize_similarity_distribution(cache):
+    """Generate a histogram of similarity scores for all cached questions."""
+    if not cache.cache["questions"] or len(cache.cache["questions"]) < 2:
+        return None  # Not enough data
+    
+    # Calculate similarities between all pairs of questions
+    questions = cache.cache["questions"]
+    similarities = []
+    
+    for i in range(len(questions)):
+        for j in range(i+1, len(questions)):
+            # Get embeddings
+            embedding_i = cache.cache["embeddings"][i]
+            embedding_j = cache.cache["embeddings"][j]
+            
+            # Calculate cosine similarity (normalized dot product)
+            dot_product = np.dot(embedding_i, embedding_j)
+            norm_i = np.linalg.norm(embedding_i)
+            norm_j = np.linalg.norm(embedding_j)
+            similarity = dot_product / (norm_i * norm_j)
+            
+            similarities.append(similarity)
+    
+    # Create histogram
+    plt.figure(figsize=(10, 6))
+    sns.histplot(similarities, bins=20, kde=True)
+    
+    # Add a vertical line at the threshold value
+    plt.axvline(x=cache.similarity_threshold, color='r', linestyle='--', 
+                label=f'Threshold ({cache.similarity_threshold})')
+    
+    # Add labels and title
+    plt.xlabel('Similarity Score', fontsize=12, fontweight='bold')
+    plt.ylabel('Frequency', fontsize=12, fontweight='bold')
+    plt.title('Distribution of Similarity Scores Between Cached Questions', 
+              fontsize=16, fontweight='bold', pad=20)
+    
+    # Add legend
+    plt.legend()
+    
+    # Add grid for better readability
+    plt.grid(linestyle='--', alpha=0.7)
+    
+    # Improve the layout
+    plt.tight_layout()
+    
+    # Save the visualization
+    plt.savefig(f"{VISUALIZATION_OUTPUT_DIR}/similarity_distribution.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    return f"{VISUALIZATION_OUTPUT_DIR}/similarity_distribution.png"
+
+
+def visualize_cost_analysis(performance_results):
+    """Generate a visualization of cost savings."""
+    # Calculate token metrics
+    total_cache_tokens = performance_results["token_usage"]["cache_validation_tokens"] + performance_results["token_usage"]["cache_modification_tokens"]
+    avg_sdk_tokens = performance_results["token_usage"]["sdk_tokens"] / performance_results["sdk_calls"] if performance_results["sdk_calls"] > 0 else 0
+    avg_cache_tokens = total_cache_tokens / performance_results["cache_hits"] if performance_results["cache_hits"] > 0 else 0
+    tokens_saved = (avg_sdk_tokens * performance_results["cache_hits"]) - total_cache_tokens
+    cost_saved = tokens_saved / 1000 * 0.001  # $0.001 per 1K tokens
+    token_reduction_pct = ((avg_sdk_tokens - avg_cache_tokens)/avg_sdk_tokens)*100 if avg_sdk_tokens > 0 else 0
+    
+    # Create a figure with two subplots
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    
+    # First subplot: Bar chart comparing average tokens per query
+    categories = ['SDK Query', 'Cache Query']
+    token_values = [avg_sdk_tokens, avg_cache_tokens]
+    
+    bars = ax1.bar(categories, token_values, color=['#FF9800', '#2196F3'])
+    
+    # Add value labels
+    for bar in bars:
+        height = bar.get_height()
+        ax1.text(bar.get_x() + bar.get_width()/2., height + 50,
+                 f'{int(height):,}',
+                 ha='center', va='bottom', fontweight='bold')
+    
+    # Add labels and title
+    ax1.set_ylabel('Average Tokens per Query', fontsize=12, fontweight='bold')
+    ax1.set_title('Token Usage Comparison', fontsize=14, fontweight='bold')
+    ax1.grid(axis='y', linestyle='--', alpha=0.7)
+    
+    # Add reduction percentage
+    ax1.annotate(f"{token_reduction_pct:.1f}% reduction", 
+                xy=(1, avg_cache_tokens), 
+                xytext=(1.2, (avg_sdk_tokens + avg_cache_tokens)/2),
+                arrowprops=dict(facecolor='black', shrink=0.05, width=1.5),
+                fontsize=12, fontweight='bold')
+    
+    # Second subplot: Cost analysis
+    # Create a horizontal bar for total savings
+    savings_categories = ['Tokens Saved', 'Cost Saved ($)']
+    savings_values = [tokens_saved, cost_saved * 1000]  # Multiply by 1000 to make it visible on the same scale
+    
+    # Use different colors for the different metrics
+    colors = ['#4CAF50', '#673AB7']
+    
+    bars = ax2.barh(savings_categories, savings_values, color=colors)
+    
+    # Add value labels with appropriate formatting
+    ax2.text(savings_values[0] + 100, 0, f'{int(tokens_saved):,} tokens', va='center', fontweight='bold')
+    ax2.text(savings_values[1] + 100, 1, f'${cost_saved:.4f}', va='center', fontweight='bold')
+    
+    # Create a secondary y-axis to show the cost in its natural scale
+    ax2_secondary = ax2.twinx()
+    ax2_secondary.set_yticks([1])
+    ax2_secondary.set_yticklabels([''])
+    
+    # Add a title
+    ax2.set_title('Estimated Savings', fontsize=14, fontweight='bold')
+    
+    # Set the x-axis label for the primary axis (tokens)
+    ax2.set_xlabel('Number of Tokens / Cost ($) × 1000', fontsize=12, fontweight='bold')
+    
+    # Add a grid for better readability
+    ax2.grid(axis='x', linestyle='--', alpha=0.7)
+    
+    # Add explanatory note
+    fig.text(0.5, 0.01, 'Note: Cost calculation based on $0.001 per 1K tokens', 
+             ha='center', fontsize=10, style='italic')
+    
+    # Improve the layout
+    plt.tight_layout()
+    
+    # Save the visualization
+    plt.savefig(f"{VISUALIZATION_OUTPUT_DIR}/cost_analysis.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    return f"{VISUALIZATION_OUTPUT_DIR}/cost_analysis.png"
+
+
+def visualize_performance_dashboard(performance_results, cache):
+    """Create a comprehensive dashboard with all visualizations."""
+    # Set up the matplotlib figure with 3 rows and 2 columns
+    fig = plt.figure(figsize=(20, 22))
+    
+    # Adjust the grid layout
+    gs = fig.add_gridspec(3, 2, hspace=0.4, wspace=0.3)
+    
+    # Define the axes for each visualization
+    ax1 = fig.add_subplot(gs[0, 0])  # Token Usage
+    ax2 = fig.add_subplot(gs[0, 1])  # Response Times
+    ax3 = fig.add_subplot(gs[1, 0])  # Question Processing Times
+    ax4 = fig.add_subplot(gs[1, 1])  # Cache Effectiveness (Pie Chart)
+    ax5 = fig.add_subplot(gs[2, 0])  # Cost Analysis
+    ax6 = fig.add_subplot(gs[2, 1])  # Similarity Distribution (if available)
+    
+    # Add a title to the entire figure
+    fig.suptitle('Denodo AI Semantic Cache Performance Dashboard', fontsize=24, fontweight='bold', y=0.98)
+    
+    # 1. Token Usage Visualization
+    # Calculate token metrics
+    total_cache_tokens = performance_results["token_usage"]["cache_validation_tokens"] + performance_results["token_usage"]["cache_modification_tokens"]
+    avg_sdk_tokens = performance_results["token_usage"]["sdk_tokens"] / performance_results["sdk_calls"] if performance_results["sdk_calls"] > 0 else 0
+    tokens_saved = (avg_sdk_tokens * performance_results["cache_hits"]) - total_cache_tokens
+    
+    # Prepare data for visualization
+    token_categories = ['SDK Total', 'Cache Validation', 'Cache Modification', 'Total Cache Usage', 'Estimated Savings']
+    token_values = [
+        performance_results["token_usage"]["sdk_tokens"],
+        performance_results["token_usage"]["cache_validation_tokens"],
+        performance_results["token_usage"]["cache_modification_tokens"],
+        total_cache_tokens,
+        tokens_saved if tokens_saved > 0 else 0
+    ]
+    
+    # Create horizontal bar chart for tokens
+    bars = ax1.barh(token_categories, token_values, color=sns.color_palette("viridis", len(token_categories)))
+    
+    # Add value labels at the end of each bar
+    for bar in bars:
+        width = bar.get_width()
+        label_x_pos = width if width > 0 else 0
+        ax1.text(label_x_pos + 100, bar.get_y() + bar.get_height()/2, f'{int(width):,}', 
+                 va='center', fontweight='bold')
+    
+    # Add labels and title
+    ax1.set_xlabel('Number of Tokens', fontsize=12, fontweight='bold')
+    ax1.set_title('Token Usage Comparison', fontsize=16, fontweight='bold')
+    ax1.grid(axis='x', linestyle='--', alpha=0.7)
+    
+    # 2. Response Time Visualization
+    # Calculate average times
+    avg_cache_time = sum(performance_results["cache_response_times"]) / len(performance_results["cache_response_times"]) if performance_results["cache_response_times"] else 0
+    avg_sdk_time = sum(performance_results["sdk_response_times"]) / len(performance_results["sdk_response_times"]) if performance_results["sdk_response_times"] else 0
+    time_saved = avg_sdk_time * performance_results["cache_hits"] - avg_cache_time * performance_results["cache_hits"]
+    speedup = avg_sdk_time/avg_cache_time if avg_cache_time > 0 else 0
+    
+    # Prepare data for visualization
+    time_categories = ['Average SDK Response', 'Average Cache Response', 'Total Time Saved']
+    time_values = [avg_sdk_time, avg_cache_time, time_saved if time_saved > 0 else 0]
+    
+    # Create horizontal bar chart for response times
+    bars = ax2.barh(time_categories, time_values, color=sns.color_palette("cool", len(time_categories)))
+    
+    # Add value labels
+    for bar in bars:
+        width = bar.get_width()
+        label_x_pos = width if width > 0 else 0
+        ax2.text(label_x_pos + 0.1, bar.get_y() + bar.get_height()/2, f'{width:.2f}s', 
+                 va='center', fontweight='bold')
+    
+    # Add labels and title
+    ax2.set_xlabel('Time (seconds)', fontsize=12, fontweight='bold')
+    ax2.set_title('Response Time Comparison', fontsize=16, fontweight='bold')
+    ax2.grid(axis='x', linestyle='--', alpha=0.7)
+    
+    # Add speedup annotation
+    ax2.annotate(f'Cache is {speedup:.1f}x faster than SDK calls', 
+                 xy=(0.5, -0.2), xycoords='axes fraction',
+                 ha='center', fontsize=12, fontweight='bold',
+                 bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8))
+    
+    # 3. Question Processing Times
+    # Get the data
+    question_numbers = [f"Q{i+1}" for i in range(len(performance_results["question_texts"]))]
+    times = performance_results["all_response_times"]
+    sources = performance_results["question_sources"]
+    
+    # Create color mapping for sources
+    colors = {'cache': 'forestgreen', 'sdk': 'orangered'}
+    bar_colors = [colors[source] for source in sources]
+    
+    # Create horizontal bar chart
+    bars = ax3.barh(question_numbers, times, color=bar_colors)
+    
+    # Add value labels and source indicators
+    for i, (bar, source) in enumerate(zip(bars, sources)):
+        width = bar.get_width()
+        source_label = "CACHE" if source == 'cache' else "SDK"
+        ax3.text(width + 0.1, bar.get_y() + bar.get_height()/2, f'{width:.2f}s ({source_label})', 
+                 va='center')
+    
+    # Add labels and title
+    ax3.set_xlabel('Processing Time (seconds)', fontsize=12, fontweight='bold')
+    ax3.set_ylabel('Question Number', fontsize=12, fontweight='bold')
+    ax3.set_title('Question Processing Times', fontsize=16, fontweight='bold')
+    
+    # Create a custom legend
+    legend_elements = [
+        Patch(facecolor=colors['cache'], label='Cache'),
+        Patch(facecolor=colors['sdk'], label='SDK')
+    ]
+    ax3.legend(handles=legend_elements, loc='upper right')
+    
+    # Add a grid for better readability
+    ax3.grid(axis='x', linestyle='--', alpha=0.7)
+    
+    # 4. Cache Effectiveness Pie Chart
+    # Calculate rates
+    cache_hit_rate = (performance_results["cache_hits"] / performance_results["questions_processed"]) * 100 if performance_results["questions_processed"] > 0 else 0
+    sdk_call_rate = 100 - cache_hit_rate
+    
+    # Data for visualization
+    labels = ['Cache Hits', 'SDK Calls']
+    sizes = [cache_hit_rate, sdk_call_rate]
+    
+    # Use a vibrant color scheme
+    colors = ['#4CAF50', '#FF5722']
+    
+    # Create a pie chart with a slight explosion for the first slice
+    explode = (0.1, 0)  # explode the 1st slice (Cache Hits)
+    
+    wedges, texts, autotexts = ax4.pie(sizes, explode=explode, labels=labels, 
+                                       colors=colors, autopct='%1.1f%%',
+                                       shadow=True, startangle=90,
+                                       textprops={'fontsize': 12, 'fontweight': 'bold'})
+    
+    # Equal aspect ratio ensures that pie is drawn as a circle
+    ax4.axis('equal')  
+    
+    # Add a title
+    ax4.set_title('Cache Effectiveness', fontsize=16, fontweight='bold')
+    
+    # Add stats annotation
+    stats_text = (f"Total Questions: {performance_results['questions_processed']}\n"
+                  f"Cache Hits: {performance_results['cache_hits']}\n"
+                  f"SDK Calls: {performance_results['sdk_calls']}")
+    
+    ax4.annotate(stats_text, xy=(0.5, -0.1), xycoords='axes fraction',
+                bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8),
+                ha='center')
+    
+    # 5. Cost Analysis
+    # Calculate token reduction metrics
+    total_cache_tokens = performance_results["token_usage"]["cache_validation_tokens"] + performance_results["token_usage"]["cache_modification_tokens"]
+    avg_sdk_tokens = performance_results["token_usage"]["sdk_tokens"] / performance_results["sdk_calls"] if performance_results["sdk_calls"] > 0 else 0
+    avg_cache_tokens = total_cache_tokens / performance_results["cache_hits"] if performance_results["cache_hits"] > 0 else 0
+    token_reduction_pct = ((avg_sdk_tokens - avg_cache_tokens)/avg_sdk_tokens)*100 if avg_sdk_tokens > 0 else 0
+    
+    # Bar chart comparing average tokens per query
+    categories = ['SDK Query', 'Cache Query']
+    token_values = [avg_sdk_tokens, avg_cache_tokens]
+    
+    bars = ax5.bar(categories, token_values, color=['#FF9800', '#2196F3'])
+    
+    # Add value labels
+    for bar in bars:
+        height = bar.get_height()
+        ax5.text(bar.get_x() + bar.get_width()/2., height + 50,
+                 f'{int(height):,}',
+                 ha='center', va='bottom', fontweight='bold')
+    
+    # Add labels and title
+    ax5.set_ylabel('Average Tokens per Query', fontsize=12, fontweight='bold')
+    ax5.set_title('Token Usage and Cost Savings', fontsize=16, fontweight='bold')
+    ax5.grid(axis='y', linestyle='--', alpha=0.7)
+    
+    # Add cost information
+    tokens_saved = (avg_sdk_tokens * performance_results["cache_hits"]) - total_cache_tokens
+    cost_saved = tokens_saved / 1000 * 0.001  # $0.001 per 1K tokens
+    
+    cost_text = (f"Total Tokens Saved: {int(tokens_saved):,}\n"
+                f"Cost Savings: ${cost_saved:.4f}\n"
+                f"Token Reduction: {token_reduction_pct:.1f}%")
+    
+    ax5.annotate(cost_text, xy=(0.5, 0.5), xycoords='axes fraction',
+                bbox=dict(boxstyle="round,pad=0.5", fc="white", ec="gray", alpha=0.8),
+                ha='center')
+    
+    # 6. Similarity Distribution (if there are enough cached questions)
+    if len(cache.cache["questions"]) >= 2:
+        # Calculate similarities between all pairs of questions
+        questions = cache.cache["questions"]
+        similarities = []
+        
+        for i in range(len(questions)):
+            for j in range(i+1, len(questions)):
+                # Get embeddings
+                embedding_i = cache.cache["embeddings"][i]
+                embedding_j = cache.cache["embeddings"][j]
+                
+                # Calculate cosine similarity (normalized dot product)
+                dot_product = np.dot(embedding_i, embedding_j)
+                norm_i = np.linalg.norm(embedding_i)
+                norm_j = np.linalg.norm(embedding_j)
+                similarity = dot_product / (norm_i * norm_j)
+                
+                similarities.append(similarity)
+        
+        # Create histogram
+        sns.histplot(similarities, bins=20, kde=True, ax=ax6)
+        
+        # Add a vertical line at the threshold value
+        ax6.axvline(x=cache.similarity_threshold, color='r', linestyle='--', 
+                    label=f'Threshold ({cache.similarity_threshold})')
+        
+        # Add labels and title
+        ax6.set_xlabel('Similarity Score', fontsize=12, fontweight='bold')
+        ax6.set_ylabel('Frequency', fontsize=12, fontweight='bold')
+        ax6.set_title('Similarity Scores Between Cached Questions', 
+                  fontsize=16, fontweight='bold')
+        
+        # Add legend
+        ax6.legend()
+        
+        # Add grid for better readability
+        ax6.grid(linestyle='--', alpha=0.7)
+    else:
+        # Not enough data for similarity distribution
+        ax6.text(0.5, 0.5, 'Not enough cached questions\nto show similarity distribution', 
+                 ha='center', va='center', fontsize=14, fontweight='bold',
+                 transform=ax6.transAxes)
+        ax6.set_title('Similarity Distribution', fontsize=16, fontweight='bold')
+        ax6.axis('off')
+    
+    # Improve overall layout
+    plt.tight_layout(rect=[0, 0, 1, 0.96])  # Make room for the overall title
+    
+    # Save the dashboard
+    plt.savefig(f"{VISUALIZATION_OUTPUT_DIR}/performance_dashboard.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    return f"{VISUALIZATION_OUTPUT_DIR}/performance_dashboard.png"
+
+
 def main():
     # Initialize OpenAI embedding model
     embeddings = OpenAIEmbeddings(
@@ -356,7 +956,14 @@ def main():
         "sdk_calls": 0,
         "cache_response_times": [],
         "sdk_response_times": [],
-        "question_sources": []  # 'cache' or 'sdk' for each question
+        "question_sources": [],  # 'cache' or 'sdk' for each question
+        "question_texts": [],    # store the actual questions
+        "all_response_times": [],  # store all response times in order
+        "token_usage": {
+            "sdk_tokens": 0,
+            "cache_validation_tokens": 0,
+            "cache_modification_tokens": 0
+        }
     }
     
     # Define a set of questions for testing that showcase the semantic cache capabilities
@@ -398,6 +1005,9 @@ def main():
         print(f"PROCESSING QUESTION: '{question}'")
         print(f"{'='*80}")
         
+        # Store question for reporting
+        performance_results["question_texts"].append(question)
+        
         # Check if a similar question exists in the cache
         cached_question, cached_sql, cached_result, similarity = cache.find_similar_question(question)
         
@@ -408,6 +1018,10 @@ def main():
             # Use LLM to validate if the questions are truly semantically related
             are_related, explanation = are_questions_semantically_related(cached_question, question)
             
+            # Estimate token usage for validation (approximate)
+            validation_tokens = len(cached_question + question) / 3
+            performance_results["token_usage"]["cache_validation_tokens"] += validation_tokens
+            
             if are_related:
                 print(f"✓ LLM VALIDATION: Questions are semantically related")
                 print(f"✓ EXPLANATION: {explanation}")
@@ -415,6 +1029,10 @@ def main():
                 # Modify the SQL query for the new question
                 start_time = time.time()
                 modified_sql = modify_sql_query(cached_sql, question, cached_question)
+                
+                # Estimate token usage for modification (approximate)
+                modification_tokens = (len(cached_question + question + cached_sql) / 3)
+                performance_results["token_usage"]["cache_modification_tokens"] += modification_tokens
                 
                 print(f"\n📜 CACHE MODIFICATION:")
                 print(f"Original SQL: {cached_sql}")
@@ -427,13 +1045,14 @@ def main():
                 # Update performance metrics
                 performance_results["cache_response_times"].append(processing_time)
                 performance_results["question_sources"].append("cache")
+                performance_results["all_response_times"].append(processing_time)
                 performance_results["cache_hits"] += 1
                 performance_results["questions_processed"] += 1
                 
                 if 200 <= status_code < 300:
                     print(f"\n✅ CACHE HIT: SQL execution successful")
                     print(f"⏱️ RESPONSE TIME: {processing_time:.2f} seconds")
-                    print(f"💰 ESTIMATED TOKEN SAVINGS: ~1000 tokens")
+                    print(f"💰 ESTIMATED TOKEN SAVINGS: ~3000 tokens")
                     print(f"🔍 RESULT: {result[:3] if len(result) > 3 else result}...")
                     
                     query_explanation = f"Query that {question}"  # Simple explanation based on the question
@@ -451,13 +1070,20 @@ def main():
                     performance_results["sdk_response_times"].append(sdk_time)
                     performance_results["sdk_calls"] += 1
                     performance_results["question_sources"][-1] = "sdk"  # Update the source for this question
+                    performance_results["all_response_times"][-1] = sdk_time  # Update timing
                     
                     if sdk_result:
                         sql_query = sdk_result.get('sql_query', '')
                         query_explanation = sdk_result.get('query_explanation', f"Query for: {question}")
+                        
+                        # Track token usage
+                        token_info = sdk_result.get('tokens', {})
+                        total_tokens = token_info.get('total_tokens', 3000)  # Default estimate if not provided
+                        performance_results["token_usage"]["sdk_tokens"] += total_tokens
 
                         print(f"📊 SQL FROM SDK: {sql_query}")
                         print(f"⏱️ SDK RESPONSE TIME: {sdk_time:.2f} seconds")
+                        print(f"🔢 TOKENS USED: {total_tokens}")
                         
                         # Add to cache
                         cache.add_to_cache(question, sql_query, query_explanation)
@@ -478,13 +1104,20 @@ def main():
                 performance_results["sdk_calls"] += 1
                 performance_results["questions_processed"] += 1
                 performance_results["question_sources"].append("sdk")
+                performance_results["all_response_times"].append(sdk_time)
                 
                 if sdk_result:
                     sql_query = sdk_result.get('sql_query', '')
                     query_explanation = sdk_result.get('query_explanation', f"Query for: {question}")
                     
+                    # Track token usage
+                    token_info = sdk_result.get('tokens', {})
+                    total_tokens = token_info.get('total_tokens', 3000)  # Default estimate if not provided
+                    performance_results["token_usage"]["sdk_tokens"] += total_tokens
+                    
                     print(f"📊 SQL FROM SDK: {sql_query}")
                     print(f"⏱️ SDK RESPONSE TIME: {sdk_time:.2f} seconds")
+                    print(f"🔢 TOKENS USED: {total_tokens}")
                     
                     # Add to cache
                     cache.add_to_cache(question, sql_query, query_explanation)
@@ -504,23 +1137,56 @@ def main():
             performance_results["sdk_calls"] += 1
             performance_results["questions_processed"] += 1
             performance_results["question_sources"].append("sdk")
+            performance_results["all_response_times"].append(sdk_time)
             
             if sdk_result:
                 sql_query = sdk_result.get('sql_query', '')
                 query_explanation = sdk_result.get('query_explanation', f"Query for: {question}")
                 
+                # Track token usage
+                token_info = sdk_result.get('tokens', {})
+                total_tokens = token_info.get('total_tokens', 3000)  # Default estimate if not provided
+                performance_results["token_usage"]["sdk_tokens"] += total_tokens
+                
                 print(f"📊 SQL FROM SDK: {sql_query}")
                 print(f"⏱️ SDK RESPONSE TIME: {sdk_time:.2f} seconds")
+                print(f"🔢 TOKENS USED: {total_tokens}")
                 
                 # Add to cache
                 cache.add_to_cache(question, sql_query, query_explanation)
             else:
                 print("❌ FAILED: No response from Denodo AI SDK")
     
-    # Generate visual performance report
+    # Generate all visualizations
     print("\n\n" + "="*80)
-    print("                  SEMANTIC CACHE PERFORMANCE REPORT                  ")
+    print("           GENERATING PERFORMANCE VISUALIZATIONS           ")
     print("="*80)
+    
+    # Generate individual visualizations
+    token_usage_chart = visualize_token_usage(performance_results)
+    print(f"✅ Generated token usage chart: {token_usage_chart}")
+    
+    response_times_chart = visualize_response_times(performance_results)
+    print(f"✅ Generated response times chart: {response_times_chart}")
+    
+    question_times_chart = visualize_question_processing_times(performance_results)
+    print(f"✅ Generated question processing times chart: {question_times_chart}")
+    
+    cache_effectiveness_chart = visualize_cache_effectiveness(performance_results)
+    print(f"✅ Generated cache effectiveness chart: {cache_effectiveness_chart}")
+    
+    cost_analysis_chart = visualize_cost_analysis(performance_results)
+    print(f"✅ Generated cost analysis chart: {cost_analysis_chart}")
+    
+    similarity_chart = visualize_similarity_distribution(cache)
+    if similarity_chart:
+        print(f"✅ Generated similarity distribution chart: {similarity_chart}")
+    else:
+        print("ℹ️ Not enough data for similarity distribution chart")
+    
+    # Generate comprehensive dashboard
+    dashboard = visualize_performance_dashboard(performance_results, cache)
+    print(f"✅ Generated comprehensive performance dashboard: {dashboard}")
     
     # Calculate aggregate statistics
     avg_cache_time = sum(performance_results["cache_response_times"]) / len(performance_results["cache_response_times"]) if performance_results["cache_response_times"] else 0
@@ -528,48 +1194,35 @@ def main():
     time_saved = avg_sdk_time * performance_results["cache_hits"] - avg_cache_time * performance_results["cache_hits"]
     speedup = avg_sdk_time/avg_cache_time if avg_cache_time > 0 else 0
     
-    # Create a summary section
+    # Token usage stats
+    total_cache_tokens = performance_results["token_usage"]["cache_validation_tokens"] + performance_results["token_usage"]["cache_modification_tokens"]
+    avg_sdk_tokens = performance_results["token_usage"]["sdk_tokens"] / performance_results["sdk_calls"] if performance_results["sdk_calls"] > 0 else 0
+    avg_cache_tokens = total_cache_tokens / performance_results["cache_hits"] if performance_results["cache_hits"] > 0 else 0
+    tokens_saved = (avg_sdk_tokens * performance_results["cache_hits"]) - total_cache_tokens
+    
+    # Print summary information
+    print("\n\n" + "="*80)
+    print("                  SEMANTIC CACHE PERFORMANCE REPORT                  ")
+    print("="*80)
+    
     print(f"\n📊 SUMMARY STATISTICS:")
     print(f"{'Total Questions Processed:':<40} {performance_results['questions_processed']}")
     print(f"{'Cache Hits:':<40} {performance_results['cache_hits']} ({(performance_results['cache_hits']/performance_results['questions_processed'])*100:.1f}%)")
     print(f"{'SDK Calls Required:':<40} {performance_results['sdk_calls']}")
     print(f"{'SDK Calls Avoided:':<40} {performance_results['cache_hits']}")
     
-    # Performance metrics
-    print(f"\n⏱️ RESPONSE TIME COMPARISON:")
-    print(f"{'Average SDK Response Time:':<40} {avg_sdk_time:.2f} seconds")
-    print(f"{'Average Cache Response Time:':<40} {avg_cache_time:.2f} seconds")
-    print(f"{'Speed Improvement:':<40} {speedup:.1f}x faster with cache")
-    print(f"{'Total Time Saved:':<40} {time_saved:.2f} seconds")
-    
-    # Cost savings
-    token_savings = performance_results["cache_hits"] * 1000  # Assuming 1000 tokens saved per cache hit
     print(f"\n💰 COST ANALYSIS:")
-    print(f"{'Estimated Token Savings:':<40} {token_savings:,} tokens")
-    print(f"{'Estimated Cost Savings:':<40} ${token_savings/1000 * 0.001:.2f} (@ $0.001 per 1K tokens)")
+    print(f"{'Estimated Token Savings:':<40} {tokens_saved:,.0f} tokens")
+    print(f"{'Estimated Cost Savings:':<40} ${tokens_saved/1000 * 0.001:.4f} (@ $0.001 per 1K tokens)")
+    print(f"{'Token Reduction:':<40} {((avg_sdk_tokens - avg_cache_tokens)/avg_sdk_tokens)*100:.1f}% per query")
     
-    # Create a visual performance chart
-    print("\n📈 PERFORMANCE VISUALIZATION:")
-    max_time = max(
-        max(performance_results["cache_response_times"] or [0]), 
-        max(performance_results["sdk_response_times"] or [0])
-    )
-    scale_factor = 50 / max_time if max_time > 0 else 1
+    print(f"\n⏱️ TIME ANALYSIS:")
+    print(f"{'Time Savings:':<40} {time_saved:.2f} seconds total")
+    print(f"{'Speed Improvement:':<40} {speedup:.1f}x faster with cache")
     
-    for i, question in enumerate(test_questions[:performance_results["questions_processed"]]):
-        q_summary = question[:60] + "..." if len(question) > 60 else question
-        source = performance_results["question_sources"][i] if i < len(performance_results["question_sources"]) else "unknown"
-        
-        print(f"\nQ{i+1}: {q_summary}")
-        
-        if source == "cache":
-            cache_time = performance_results["cache_response_times"][performance_results["question_sources"][:i+1].count("cache")-1]
-            cache_bar = "█" * int(cache_time * scale_factor)
-            print(f"CACHE: {cache_bar} {cache_time:.2f}s")
-        elif source == "sdk":
-            sdk_time = performance_results["sdk_response_times"][performance_results["question_sources"][:i+1].count("sdk")-1]
-            sdk_bar = "█" * int(sdk_time * scale_factor)
-            print(f"SDK:   {sdk_bar} {sdk_time:.2f}s")
+    print(f"\n🖼️ VISUALIZATIONS:")
+    print(f"{'Performance Dashboard:':<40} {dashboard}")
+    print(f"{'Individual Charts:':<40} {VISUALIZATION_OUTPUT_DIR}/")
     
     # Display cache contents
     print("\n\n" + "="*80)
