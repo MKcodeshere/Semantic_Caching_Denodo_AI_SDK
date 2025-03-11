@@ -94,15 +94,15 @@ python semantic_cache.py
 ## Requirements
 
 - Python 3.10+
-- OpenAI API access
+- LLM access ( Open source or ollama small models)
 - Denodo Platform 9.0.5 or higher
+- Denodo AI SDK Installed ( run only api ) 
 - FAISS for vector storage
 - LangChain for embeddings and LLM interfaces
 
 ## Future Improvements
 
 - Integration with other vector databases (Pinecone, Weaviate)
-- Support for additional embedding models
 - Automated question caching based on user feedback
 - More sophisticated SQL modification strategies
 
